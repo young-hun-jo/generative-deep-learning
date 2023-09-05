@@ -14,7 +14,7 @@ from keras import backend as K
 from utils.callbacks import CustomCallback, step_decay_schedule
 
 
-class AutoEncoder():
+class AutoEncoder(object):
     def __init__(self,
                  input_dim: Tuple,
                  encoder_conv_filters: List[int],
