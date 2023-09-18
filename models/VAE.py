@@ -1,135 +1,192 @@
-from typing import Tuple, List
+from typing import List
 
 import numpy as np
+import torch
+import torch.nn as nn
 
-from keras.layers import Input, Conv2D, LeakyReLU, BatchNormalization, Dropout, Flatten, Dense, Lambda, Reshape, Activation
-from keras.layers import Conv2DTranspose
-from keras.optimizers import Adam
-from keras.models import Model
-from keras import backend as K
+from torch.utils.data import Dataset
 
 
-class VariationalAutoEncoder(object):
+def vae_loss(y_true, y_pred, mu, log_var, r_loss_factor):
+    def calc_rmse_loss(y_true, y_pred):
+        rmse_loss = torch.mean(torch.square(y_true - y_pred), dim=(1,2,3))
+        return rmse_loss
+
+    def calc_kl_loss(mu, log_var):
+        kl_loss = -0.5 * torch.sum(1 + log_var - torch.square(mu) - torch.exp(log_var), dim=1)
+        return kl_loss
+
+    rmse_loss = calc_rmse_loss(y_true, y_pred)
+    kl_loss = calc_kl_loss(mu, log_var)
+    print("ㄴ rmse loss(mean of batch):", torch.mean(rmse_loss.data))
+    print("ㄴ kl loss(mean of batch):", torch.mean(kl_loss.data))
+    return torch.mean(r_loss_factor * rmse_loss + kl_loss)
+
+
+class Sampling(nn.Module):
+    def __init__(self):
+        super(Sampling, self).__init__()
+
+    def forward(self, mu, log_var):
+        epsilon = torch.randn(size=mu.shape)
+        return mu + torch.exp(log_var / 2) * epsilon
+
+
+class VariationalAutoEncoder(nn.Module):
     def __init__(self,
-                 input_dim: Tuple,
-                 encoder_conv_filters: List[int],
-                 encoder_conv_kernel_size: List[int],
-                 encoder_conv_strides: List[int],
-                 decoder_conv_t_filters: List[int],
-                 decoder_conv_t_kernel_size: List[int],
-                 decoder_conv_t_strides: List[int],
+                 in_channels: int,
                  z_dim: int,
-                 use_batch_norm=False,
-                 use_dropout=False
-                 ):
-        self.name = "variational-auto-encoder"
-        self.input_dim = input_dim
-        self.encoder_conv_filters = encoder_conv_filters
-        self.encoder_conv_kernel_size = encoder_conv_kernel_size
-        self.encoder_conv_strides = encoder_conv_strides
-        self.decoder_conv_t_filters = decoder_conv_t_filters
-        self.decoder_conv_t_kernel_size = decoder_conv_t_kernel_size
-        self.decoder_conv_t_strides = decoder_conv_t_strides
+                 encoder_hidden_dims: List[int],
+                 batch_size):
+        super(VariationalAutoEncoder, self).__init__()
+        self.batch_size = batch_size
+        decoder_hidden_dims = encoder_hidden_dims.copy()
+        decoder_hidden_dims.reverse()
 
-        self.use_batch_norm = use_batch_norm
-        self.use_dropout = use_dropout
-
-        self.z_dim = z_dim
-
-        self.n_layers_encoder = len(encoder_conv_filters)
-        self.n_layers_decoder = len(decoder_conv_t_filters)
-
-        self._build()
-
-    def _build(self):
-        # =======
+        if len(encoder_hidden_dims) != 5:
+            raise IndexError("hidden-dims layer length must be five(`5`)")
         # Encoder
-        # =======
-        encoder_input = Input(shape=self.input_dim, name='encoder-input')
-        x = encoder_input
-        for i in range(self.n_layers_encoder):
-            conv_layer = Conv2D(filters=self.encoder_conv_filters[i],
-                                kernel_size=self.encoder_conv_kernel_size[i],
-                                strides=self.encoder_conv_strides[i],
-                                padding='same',
-                                name=f'encoder_conv_{i}')
-            x = conv_layer(x)
-            x = LeakyReLU()(x)
-            if self.use_batch_norm:
-                x = BatchNormalization()(x)
-            if self.use_dropout:
-                x = Dropout(rate=0.25)(x)
-        shape_before_flattening = K.int_shape(x)[1:]
+        self.encoder_l1 = nn.Sequential(nn.Conv2d(in_channels=in_channels,
+                                                  out_channels=encoder_hidden_dims[0],
+                                                  kernel_size=3,
+                                                  stride=2,
+                                                  padding=1),
+                                        nn.BatchNorm2d(encoder_hidden_dims[0]),
+                                        nn.LeakyReLU()
+                                        )
+        self.encoder_l2 = nn.Sequential(nn.Conv2d(in_channels=encoder_hidden_dims[0],
+                                                  out_channels=encoder_hidden_dims[1],
+                                                  kernel_size=3,
+                                                  stride=2,
+                                                  padding=1),
+                                        nn.BatchNorm2d(encoder_hidden_dims[1]),
+                                        nn.LeakyReLU()
+                                        )
+        self.encoder_l3 = nn.Sequential(nn.Conv2d(in_channels=encoder_hidden_dims[1],
+                                                  out_channels=encoder_hidden_dims[2],
+                                                  kernel_size=3,
+                                                  stride=2,
+                                                  padding=1),
+                                        nn.BatchNorm2d(encoder_hidden_dims[2]),
+                                        nn.LeakyReLU()
+                                        )
+        self.encoder_l4 = nn.Sequential(nn.Conv2d(in_channels=encoder_hidden_dims[2],
+                                                  out_channels=encoder_hidden_dims[3],
+                                                  kernel_size=3,
+                                                  stride=2,
+                                                  padding=1),
+                                        nn.BatchNorm2d(encoder_hidden_dims[3]),
+                                        nn.LeakyReLU()
+                                        )
+        self.encoder_l5 = nn.Sequential(nn.Conv2d(in_channels=encoder_hidden_dims[3],
+                                                  out_channels=encoder_hidden_dims[4],
+                                                  kernel_size=3,
+                                                  stride=2,
+                                                  padding=1),
+                                        nn.BatchNorm2d(encoder_hidden_dims[4]),
+                                        nn.LeakyReLU()
+                                        )
+        # caching variable
+        self.shape_before_flatten = (encoder_hidden_dims[-1], 1, 1)
+        self.shape_after_flatten = np.prod(self.shape_before_flatten)
 
-        x = Flatten()(x)
-        # make layers for sampling layer
-        self.mu = Dense(self.z_dim, name='mu')(x)
-        self.log_var = Dense(self.z_dim, name='log_var')(x)
-        self.encoder_mu_log_var = Model(inputs=encoder_input, outputs=(self.mu, self.log_var))
+        self.mu = nn.Linear(in_features=self.shape_after_flatten, out_features=z_dim)
+        self.log_var = nn.Linear(in_features=self.shape_after_flatten, out_features=z_dim)
+        self.sampling_layer = Sampling()
 
-        # make sampling layer using Lambda-layer
-        def sampling(args):
-            mu, log_var = args
-            epsilon = K.random_normal(shape=K.shape(mu), mean=0, stddev=1.0)
-            return mu + K.exp(log_var / 2) * epsilon
-
-        encoder_output = Lambda(sampling, name='encoder_output')([self.mu, self.log_var])
-
-        self.encoder = Model(inputs=encoder_input, outputs=encoder_output)
-
-        # =======
         # Decoder
-        # =======
-        decoder_input = Input(shape=(self.z_dim, 1), name='decoder_input')
+        print("shape_after_flatten:", self.shape_after_flatten)
+        self.decoder_fc = nn.Linear(in_features=z_dim, out_features=self.shape_after_flatten)
 
-        x = Dense(np.prod(shape_before_flattening))(decoder_input)
-        x = Reshape(shape_before_flattening)(x)
-        for i in range(self.n_layers_decoder):
-            conv_t_layer = Conv2DTranspose(filters=self.decoder_conv_t_filters[i],
-                                           kernel_size=self.decoder_conv_t_kernel_size[i],
-                                           strides=self.decoder_conv_t_strides[i],
-                                           padding='same',
-                                           name=f'decoder_conv_t_{i}')
+        self.decoder_l1 = nn.Sequential(nn.ConvTranspose2d(in_channels=self.shape_before_flatten[0],
+                                                           out_channels=decoder_hidden_dims[0],
+                                                           kernel_size=3,
+                                                           stride=2,
+                                                           padding=1,
+                                                           output_padding=1),
+                                        nn.BatchNorm2d(decoder_hidden_dims[0]),
+                                        nn.LeakyReLU()
+                                        )
+        self.decoder_l2 = nn.Sequential(nn.ConvTranspose2d(in_channels=decoder_hidden_dims[0],
+                                                           out_channels=decoder_hidden_dims[1],
+                                                           kernel_size=3,
+                                                           stride=2,
+                                                           padding=1,
+                                                           output_padding=1),
+                                        nn.BatchNorm2d(decoder_hidden_dims[1]),
+                                        nn.LeakyReLU()
+                                        )
+        self.decoder_l3 = nn.Sequential(nn.ConvTranspose2d(in_channels=decoder_hidden_dims[1],
+                                                           out_channels=decoder_hidden_dims[2],
+                                                           kernel_size=3,
+                                                           stride=2,
+                                                           padding=1),
+                                        nn.BatchNorm2d(decoder_hidden_dims[2]),
+                                        nn.LeakyReLU()
+                                        )
+        self.decoder_l4 = nn.Sequential(nn.ConvTranspose2d(in_channels=decoder_hidden_dims[2],
+                                                           out_channels=decoder_hidden_dims[3],
+                                                           kernel_size=3,
+                                                           stride=2,
+                                                           padding=1,
+                                                           output_padding=1),
+                                        nn.BatchNorm2d(decoder_hidden_dims[3]),
+                                        nn.LeakyReLU()
+                                        )
+        self.decoder_l5 = nn.Sequential(nn.ConvTranspose2d(in_channels=decoder_hidden_dims[3],
+                                                           out_channels=decoder_hidden_dims[4],
+                                                           kernel_size=3,
+                                                           stride=2,
+                                                           padding=1,
+                                                           output_padding=1),
+                                        nn.BatchNorm2d(decoder_hidden_dims[4]),
+                                        nn.LeakyReLU()
+                                        )
+        self.final_layer = nn.Sequential(nn.Conv2d(in_channels=decoder_hidden_dims[4],
+                                                   out_channels=1,
+                                                   kernel_size=3,
+                                                   padding='same'),
+                                         nn.Sigmoid()
+                                         )
 
-            x = conv_t_layer(x)
-            if i < self.n_layers_decoder - 1:
-                if self.use_batch_norm:
-                    x = BatchNormalization()(x)
-                x = LeakyReLU()(x)
-                if self.use_dropout:
-                    x = Dropout(rate=0.25)(x)
-            else:  # LeakyRelu is not applied to final output layer
-                x = Activation('sigmoid')(x)
+    def forward(self, x):
+        # Encoder
+        x = self.encoder_l1(x)
+        x = self.encoder_l2(x)
+        x = self.encoder_l3(x)
+        x = self.encoder_l4(x)
+        x = self.encoder_l5(x)
+        x = nn.Flatten()(x)
+        mu = self.mu(x)
+        log_var = self.log_var(x)
 
-        decoder_output = x
-        self.decoder = Model(inputs=decoder_input, outputs=decoder_output)
+        x = self.sampling_layer(mu, log_var)
 
-        # make full vae
-        model_input = encoder_input
-        model_output = self.decoder(model_input)
-        self.model = Model(inputs=model_input, outputs=model_output)
+        # Decoder
+        x = self.decoder_fc(x)
+        x = torch.reshape(x, (self.batch_size, *self.shape_before_flatten))
+        x = self.decoder_l1(x)
+        x = self.decoder_l2(x)
+        x = self.decoder_l3(x)
+        x = self.decoder_l4(x)
+        x = self.decoder_l5(x)
+        y = self.final_layer(x)
 
-    def compile(self, learning_rate, r_loss_factor):
-        self.learning_rate = learning_rate
+        self.mu_unit = mu
+        self.log_var_unit = log_var
 
-        # reconstruction loss
-        def vae_rmse_loss(y_true, y_pred):
-            rmse_loss = K.mean(K.square(y_true - y_pred), axis=[1, 2, 3])
-            return r_loss_factor * rmse_loss
-        # latent loss
-        def vae_kl_loss(y_true, y_pred):
-            kl_loss = -0.5 * K.sum(1 + self.log_var - K.square(self.mu) - K.exp(self.log_var), axis=1)
-            return kl_loss
-        # final loss of vae
-        def vae_loss(y_true, y_pred):
-            rmse_loss = vae_rmse_loss(y_true, y_pred)
-            kl_loss = vae_kl_loss(y_true, y_pred)
-            return rmse_loss + kl_loss
-
-        optimizer = Adam(lr=learning_rate)
-        self.model.compile(optimizer=optimizer, loss=vae_loss, metrics=[vae_rmse_loss, vae_kl_loss])
+        return y
 
 
+class CustomDataset(Dataset):
+    def __init__(self, x: np.array, y: np.array):
+        self.x = np.transpose(x, (0, 3, 1, 2))
+        self.y = y
 
+    def __len__(self):
+        return len(self.y)
 
-
+    def __getitem__(self, index):
+        x = self.x[index,:,:,:]
+        y = self.y[index]
+        return x, y
