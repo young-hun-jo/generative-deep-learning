@@ -27,9 +27,12 @@ def run_style_transfer(vgg16,
                        style_img,
                        num_steps=300,
                        content_weight=1,
-                       style_weight=1000000):
+                       style_weight=1000000,
+                       tv_weight=5e-1):
     print("Build style transfer model..")
-    model, content_losses, style_losses = get_style_model_and_losses(vgg16, vgg16_mean, vgg16_std, base_img, style_img)
+    model, content_losses, style_losses, total_variation_losses = get_style_model_and_losses(vgg16, vgg16_mean,
+                                                                                             vgg16_std, base_img,
+                                                                                             style_img)
 
     input_img.requires_grad_(True)  # enable backpropagation
     model.requires_grad_(False)  # disable backpropagation
@@ -49,23 +52,27 @@ def run_style_transfer(vgg16,
 
             content_score = 0
             style_score = 0
+            total_variation_score = 0
 
             for cl in content_losses:
                 content_score += cl.loss
             for sl in style_losses:
                 style_score += sl.loss
+            for tl in total_variation_losses:
+                total_variation_score += tl.loss
 
             content_score *= content_weight
             style_score *= style_weight
+            total_variation_score *= tv_weight
 
-            loss = content_score + style_score
+            loss = content_score + style_score + total_variation_score
             loss.backward()
 
             run[0] += 1
             if run[0] % 50 == 0:
                 print(f"run {run}")
                 print(
-                    f"Total Loss: {loss.item(): .3f} | Content Loss: {content_score.item(): .3f} | Style Loss: {style_score.item(): .3f}")
+                    f"Total Loss: {loss.item(): .3f} | Content Loss: {content_score.item(): .3f} | Style Loss: {style_score.item(): .3f} | Total Variation Loss: {total_variation_score.item(): .3f}")
                 print()
             return loss
 
@@ -89,6 +96,7 @@ def get_style_model_and_losses(vgg16,
 
     content_losses = []
     style_losses = []
+    total_variation_losses = []
 
     model = nn.Sequential(normalization)
 
@@ -100,7 +108,7 @@ def get_style_model_and_losses(vgg16,
             name = "conv_{}".format(i)
         elif isinstance(layer, nn.ReLU):
             name = "relu_{}".format(i)
-            layer = nn.ReLU(inplace=False)  # inplace=True일 시, Relu의 출력값이 이전 컨볼루션 레이어의 입력을 덮어씌우게 되어 Gradient 계산을 적절하게 하지 못하게 됨
+            layer = nn.ReLU(inplace=False)  # inplace=True에서 손실 값이 잘 동작하지 않는다는데..?
         elif isinstance(layer, nn.MaxPool2d):
             name = "pool_{}".format(i)
         elif isinstance(layer, nn.BatchNorm2d):
@@ -115,6 +123,11 @@ def get_style_model_and_losses(vgg16,
             content_loss = ContentLoss(syn_img)
             model.add_module("content_loss_{}".format(i), content_loss)
             content_losses.append(content_loss)
+
+            total_variation_loss = TotalVariationLoss(syn_img)
+            model.add_module("total_variation_loss_{}".format(i), total_variation_loss)
+            total_variation_losses.append(total_variation_loss)
+
         if name in style_layers:
             syn_ftr = model(style_img).detach()
             style_loss = StyleLoss(syn_ftr)
@@ -127,7 +140,7 @@ def get_style_model_and_losses(vgg16,
             end_idx = i
             break
     model = model[:(end_idx + 1)]
-    return model, content_losses, style_losses
+    return model, content_losses, style_losses, total_variation_losses
 
 
 def gram_matrix(feature):
@@ -179,6 +192,22 @@ class StyleLoss(nn.Module):
         style_gram = gram_matrix(style_feature)
         self.loss = F.mse_loss(style_gram, self.syn_gram)
         return style_feature
+
+
+class TotalVariationLoss(nn.Module):
+    def __init__(self, syn_img):
+        super(TotalVariationLoss, self).__init__()
+        self.syn_img = syn_img
+
+    def forward(self, input_img):
+        orig_img = self.syn_img[..., :-1, :-1]
+        orig_img_right = self.syn_img[..., :-1, 1:]
+        orig_img_down = self.syn_img[..., 1:, :-1]
+
+        right_loss = F.mse_loss(orig_img, orig_img_right)
+        down_loss = F.mse_loss(orig_img, orig_img_down)
+        self.loss = right_loss + down_loss
+        return input_img
 
 
 class Normalization(nn.Module):
