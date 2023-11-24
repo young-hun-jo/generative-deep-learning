@@ -3,5 +3,3 @@ run/
 .idea/
 __pycache__/
 *.pyc
-*.jpg
-*.zip
