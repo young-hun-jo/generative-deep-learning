@@ -427,8 +427,8 @@ for epoch in range(n_epochs):
         # 2. reconstrunction loss: 생성자가 생성한 각 도메인 변환된 이미지와 각 도메인의 실제 이미지와 차이가 얼마나 나는지 측정
         reconst_A = generator_BA(fake_B)
         reconst_B = generator_AB(fake_A)
-        reconst_loss_A = criterion_identity(reconst_A, real_A)
-        reconst_loss_B = criterion_identity(reconst_B, real_B)
+        reconst_loss_A = criterion_reconst(reconst_A, real_A)
+        reconst_loss_B = criterion_reconst(reconst_B, real_B)
         reconst_loss = (reconst_loss_A + reconst_loss_B) / 2
 
         # 3. identity loss: 타겟 도메인의 실제 이미지를 생성자에 넣었을 때, 타겟 도메인 이미지를 그대로 잘 형성하는지 측정
